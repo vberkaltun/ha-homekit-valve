@@ -65,6 +65,7 @@ from .const import (
     CONF_LINKED_HUMIDITY_SENSOR,
     CONF_LINKED_MOTION_SENSOR,
     CONF_LINKED_OBSTRUCTION_SENSOR,
+    CONF_LINKED_TIMER,
     CONF_LOW_BATTERY_THRESHOLD,
     CONF_MAX_FPS,
     CONF_MAX_HEIGHT,
@@ -81,6 +82,7 @@ from .const import (
     DEFAULT_AUDIO_CODEC,
     DEFAULT_AUDIO_MAP,
     DEFAULT_AUDIO_PACKET_SIZE,
+    DEFAULT_LINKED_TIMER,
     DEFAULT_LOW_BATTERY_THRESHOLD,
     DEFAULT_MAX_FPS,
     DEFAULT_MAX_HEIGHT,
@@ -225,7 +227,8 @@ SWITCH_TYPE_SCHEMA = BASIC_INFO_SCHEMA.extend(
                     TYPE_VALVE,
                 )
             ),
-        )
+        ),
+        vol.Optional(CONF_LINKED_TIMER, default=DEFAULT_LINKED_TIMER): cv.boolean,
     }
 )
 
