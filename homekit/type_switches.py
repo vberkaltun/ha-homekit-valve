@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Final, NamedTuple
 
@@ -47,7 +48,10 @@ from .const import (
     CHAR_NAME,
     CHAR_ON,
     CHAR_OUTLET_IN_USE,
+    CHAR_REMAINING_DURATION,
+    CHAR_SET_DURATION,
     CHAR_VALVE_TYPE,
+    CONF_LINKED_TIMER,
     SERV_OUTLET,
     SERV_SWITCH,
     SERV_VALVE,
@@ -240,36 +244,94 @@ class ValveBase(HomeAccessory):
         self.open_states = open_states
         self.on_service = on_service
         self.off_service = off_service
+        
+        self.timer_exist = self.config[CONF_LINKED_TIMER]
+        self.timer_task = None
 
-        serv_valve = self.add_preload_service(SERV_VALVE)
+        if self.timer_exist:
+            serv_valve = self.add_preload_service(
+                SERV_VALVE,
+                [CHAR_SET_DURATION, CHAR_REMAINING_DURATION])
+            self.char_set_duration = serv_valve.configure_char(
+                CHAR_SET_DURATION,
+                value=300,
+                setter_callback=self.set_duration)
+            self.char_remaining_duration = serv_valve.configure_char(
+                CHAR_REMAINING_DURATION,
+                value=300)
+        else:
+            serv_valve = self.add_preload_service(SERV_VALVE)
+
         self.char_active = serv_valve.configure_char(
-            CHAR_ACTIVE, value=False, setter_callback=self.set_state
-        )
-        self.char_in_use = serv_valve.configure_char(CHAR_IN_USE, value=False)
+            CHAR_ACTIVE,
+            value=False,
+            setter_callback=self.set_active)
+        self.char_in_use = serv_valve.configure_char(
+            CHAR_IN_USE,
+            value=False)
         self.char_valve_type = serv_valve.configure_char(
-            CHAR_VALVE_TYPE, value=VALVE_TYPE[valve_type].valve_type
-        )
+            CHAR_VALVE_TYPE,
+            value=VALVE_TYPE[valve_type].valve_type)
+
         # Set the state so it is in sync on initial
         # GET to avoid an event storm after homekit startup
         self.async_update_state(state)
 
-    def set_state(self, value: bool) -> None:
-        """Move value state to value if call came from HomeKit."""
-        _LOGGER.debug("%s: Set switch state to %s", self.entity_id, value)
-        self.char_in_use.set_value(value)
-        params = {ATTR_ENTITY_ID: self.entity_id}
-        service = self.on_service if value else self.off_service
-        self.async_call_service(self.domain, service, params)
-
     @callback
     def async_update_state(self, new_state: State) -> None:
-        """Update switch state after state changed."""
+        """Handle state change to update HomeKit value."""
         current_state = 1 if new_state.state in self.open_states else 0
-        _LOGGER.debug("%s: Set active state to %s", self.entity_id, current_state)
+        _LOGGER.debug("%s: HomeKit active state set to %s", self.entity_id, current_state)
         self.char_active.set_value(current_state)
-        _LOGGER.debug("%s: Set in_use state to %s", self.entity_id, current_state)
         self.char_in_use.set_value(current_state)
+        self.update_timer(self.char_set_duration.value)
 
+    def set_active(self, value: bool) -> None:
+        """Set the active state based on HomeKit interaction."""
+        _LOGGER.debug("%s: HomeKit requested active state set to %s", self.entity_id, value)
+        self.char_in_use.set_value(value)
+        self.update_home_assistant(value)
+        self.update_timer(self.char_set_duration.value)
+
+    def set_duration(self, value: int) -> None:
+        """Set the duration for the valve operation based on HomeKit interaction."""
+        _LOGGER.debug("%s: HomeKit requested duration set to %s seconds", self.entity_id, value)
+        self.char_remaining_duration.set_value(value)
+        self.update_timer(value)
+
+    def update_home_assistant(self, value: bool) -> None:
+        """Send a service call to Home Assistant to update the valve state."""
+        params = {ATTR_ENTITY_ID: self.entity_id}
+        service = self.on_service if value else self.off_service
+
+        _LOGGER.debug("%s: Calling Home Assistant service: %s with params: %s", self.entity_id, service, params)
+        self.async_call_service(self.domain, service, params)
+
+    def update_timer(self, duration: int):
+        """Update the internal timer task based on the duration and active state."""
+        if not self.timer_exist:
+            _LOGGER.debug("%s: Timer is disabled, skipping timer update.", self.entity_id)
+            return
+        if self.timer_task:
+            _LOGGER.debug("%s: Cancelling existing timer task.", self.entity_id)
+            self.timer_task.cancel()
+            self.timer_task = None
+        if self.char_active.value == 1:
+            _LOGGER.debug("%s: Valve is active, starting new timer with duration: %s seconds.", self.entity_id, duration)
+            self.timer_task = asyncio.create_task(self.create_timer(duration))
+
+    async def create_timer(self, duration: int):
+        """Manage the countdown for the valve's remaining duration and deactivate when finished."""
+        while duration > 0:
+            _LOGGER.debug("%s: Countdown - remaining duration: %s seconds", self.entity_id, duration)
+            self.char_remaining_duration.set_value(duration)
+            await asyncio.sleep(1)
+            duration -= 1
+
+        _LOGGER.debug("%s: Timer finished - turning off valve", self.entity_id)
+        self.char_active.set_value(0)
+        self.char_in_use.set_value(0)
+        self.update_home_assistant(0)
 
 @TYPES.register("ValveSwitch")
 class ValveSwitch(ValveBase):
